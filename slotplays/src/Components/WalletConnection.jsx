@@ -1,295 +1,566 @@
+import "./wallet.css";
 
-import { Buffer } from 'buffer';
-window.Buffer = Buffer.Buffer;
-import React, { useState, useEffect } from 'react';
-import bs58 from 'bs58';
-import './wallet.css';
-import { Connection, PublicKey, Transaction,clusterApiUrl, SystemProgram,Keypair } from '@solana/web3.js';
-// import { TOKEN ,TOKEN_PROGRAM_ID } from '@solana/spl-token'; 
+import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  getOrCreateAssociatedTokenAccount,
-  createTransferInstruction,
   TOKEN_PROGRAM_ID,
-} from '@solana/spl-token';
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+  getAccount,
+  getAssociatedTokenAddress,
+  getOrCreateAssociatedTokenAccount,
+} from "@solana/spl-token";
 
+import Modal from "./Modal";
+import { useWallet } from "@solana/wallet-adapter-react";
 
+/**
+ * Formats a number with K, M, B, T suffixes for readability.
+ * @param {number} amount - The amount to format.
+ * @returns {string} Formatted amount string.
+ */
+function formatAmount(amount) {
+  if (isNaN(amount) || amount < 0) return "0.00";
+  if (amount >= 1e12) return (amount / 1e12).toFixed(2) + "T";
+  if (amount >= 1e9) return (amount / 1e9).toFixed(2) + "B";
+  if (amount >= 1e6) return (amount / 1e6).toFixed(2) + "M";
+  if (amount >= 1e3) return (amount / 1e3).toFixed(2) + "K";
+  return amount.toFixed(2);
+}
 
-// Ensure Buffer is available in the window object for the browser environment
+// Constants for token and recipient addresses
+const TOKEN_MINT_ADDRESS = new PublicKey(
+  "7xX4P4Pqp18a1JGiAvKKD1nto38DHdtqi1jkBKHHpump"
+);
+const RECIPIENT_WALLET = new PublicKey(
+  "EqBv4c7JMbiKjxCRv5AedMLNoZCwEgjDbn9CSs51jGni"
+);
 
+const apiBaseUrl = "http://localhost:8000/api/users";
 
-const WalletConnect = ({ onConnect, onDisconnect }) => {
-  const [walletAddress, setWalletAddress] = useState(null);
-  const [connectedWallet, setConnectedWallet] = useState(null);
-  const [availableWallets, setAvailableWallets] = useState([]);
-  const [balance, setBalance] = useState(null);
+/**
+ * WalletConnect Component
+ * Manages wallet connection, balance display, and token transactions.
+ */
+const WalletConnect = () => {
+  // Wallet adapter hooks
+  const {
+    publicKey,
+    sendTransaction,
+    wallet,
+    select,
+    wallets,
+    connected,
+    disconnect,
+  } = useWallet();
 
-  const apiBaseUrl = 'http://localhost:8000/api/users'; 
+  // State management
+  const [backendBalance, setBackendBalance] = useState(0);
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [modalContent, setModalContent] = useState(null);
+  const [transactionAmount, setTransactionAmount] = useState("");
+  const [isPercentage, setIsPercentage] = useState(false);
+  const [activeTab, setActiveTab] = useState("deposit");
+  const [isConnected, setIsConnected] = useState(false);
+  const endpoint = "https://mainnet.helius-rpc.com/?api-key=31722f48-cf67-4177-9131-0be10384530b";
 
-  useEffect(() => {
-    // Detect available wallets in the user's browser
-    const { solana } = window;
-    const detectedWallets = [];
+  // Create Solana connection
+  const connection = useMemo(() => new Connection(endpoint), []);
 
-    if (solana) {
-      if (solana.isPhantom) {
-        detectedWallets.push('Phantom');
-      }
-      if (solana.isSolflare) {
-        detectedWallets.push('Solflare');
-      }
-      if (window.sollet) {
-        detectedWallets.push('Sollet');
-      }
-    }
-
-    setAvailableWallets(detectedWallets);
+  /**
+   * Resets the component state.
+   */
+  const resetState = useCallback(() => {
+    setTransactionAmount("");
+    setIsPercentage(false);
+    setActiveTab("deposit");
+    setModalContent(null);
   }, []);
 
-  const fetchBalance = async (walletAddress) => {
-    try {
-      const res = await fetch(`${apiBaseUrl}/getBalance/${walletAddress}`);
-      if (res.ok) {
-        const data = await res.json();
-        setBalance(data.balance);
-      } else {
-        console.error('Failed to fetch balance:', await res.json());
-      }
-    } catch (error) {
-      console.error('Error fetching balance:', error);
-    }
-  };
-
-  const promptWalletChoice = () => {
-    const choice = window.confirm('Do you want to connect to Phantom or Solflare wallet?');
-    if (choice) {
-      const selectedWallet = window.prompt('Please type Phantom or Solflare to select your wallet:');
-      if (selectedWallet === 'Phantom' || selectedWallet === 'Solflare') {
-        connectWallet(selectedWallet);
-      } else {
-        alert('Invalid wallet selected. Please choose either Phantom or Solflare.');
-      }
-    } else {
-      alert('You chose not to connect a wallet.');
-    }
-  };
-
-  const connectWallet = async (wallet) => {
-    try {
-      const { solana } = window;
-
-      // Check if the solana object is available
-      if (!solana) {
-        console.error('Solana Wallet not found! Please install a supported wallet.');
-        alert('Solana Wallet not found! Please install a supported wallet.');
-        return;
-      }
-
-      // Handle Phantom wallet
-      if (wallet === 'Phantom' && solana.isPhantom) {
-        const response = await solana.connect();
-        const walletAddress = response.publicKey.toString();
-        setWalletAddress(walletAddress);
-        setConnectedWallet('Phantom');
-
-        // Send wallet info to the backend
-        await sendWalletInfoToBackend(walletAddress);
-        onConnect(walletAddress);
-        fetchBalance(walletAddress);
-      }
-
-      // Handle Solflare wallet
-      else if (wallet === 'Solflare' && solana.isSolflare) {
-        const response = await solana.connect();
-        const walletAddress = response.publicKey.toString();
-        setWalletAddress(walletAddress);
-        setConnectedWallet('Solflare');
-
-        // Send wallet info to the backend
-        await sendWalletInfoToBackend(walletAddress);
-        onConnect(walletAddress);
-        fetchBalance(walletAddress);
-      }
-
-      // Handle Sollet wallet
-      else if (wallet === 'Sollet' && window.sollet) {
-        const sollet = window.open('https://www.sollet.io', '_blank');
-        alert('Sollet wallet connection requires manual setup.');
-        sollet.focus();
-      }
-
-      // Handle unsupported wallet type
-      else {
-        alert(`${wallet} Wallet not supported.`);
-      }
-    } catch (error) {
-      console.error('Error connecting wallet:', error);
-      alert('An error occurred while connecting the wallet. Please try again.');
-    }
-  };
-
-  const sendWalletInfoToBackend = async (walletAddress) => {
+  /**
+   * Connects the wallet to the backend.
+   * @param {string} walletAddress - The wallet address to connect.
+   * @param {string} publicKey - The public key of the wallet.
+   */
+  const connectWallet = useCallback(async (walletAddress, publicKey) => {
     try {
       const res = await fetch(`${apiBaseUrl}/connect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ walletAddress, publicKey: walletAddress }),
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ walletAddress, publicKey }),
       });
 
       if (res.ok) {
         const data = await res.json();
-        alert(data.message);
+        setBackendBalance(parseFloat(data.balance) || 0);
+        setIsConnected(true);
+        return data;
       } else {
         const errorData = await res.json();
-        console.error('Failed to connect wallet:', errorData);
-        alert('Failed to connect wallet to the backend.');
+        throw new Error(errorData.error || "Unknown error");
       }
     } catch (error) {
-      console.error('Error sending wallet info to backend:', error);
+      console.error("Error connecting wallet:", error);
+      throw error;
     }
-  };
+  }, []);
 
-
-  
-  const handleDeposit = async () => {
-    const amount = prompt("Enter amount to deposit (in $SLOT token):");
-    if (!amount) return;
-  
-    const amountValue = parseFloat(amount);
-    if (isNaN(amountValue) || amountValue <= 0) {
-      alert("Invalid or negative amount entered.");
-      return;
-    }
-  
-    try {
-      if (!walletAddress) {
-        throw new Error("Wallet not connected!");
+  /**
+   * Fetches the wallet balance from the blockchain.
+   */
+  const fetchWalletBalance = useCallback(async () => {
+    if (publicKey) {
+      try {
+        const tokenAccount = await getOrCreateAssociatedTokenAccount(
+          connection,
+          publicKey,
+          TOKEN_MINT_ADDRESS,
+          publicKey
+        );
+        const accountInfo = await connection.getTokenAccountBalance(tokenAccount.address);
+        setWalletBalance(parseFloat(accountInfo.value.uiAmount) || 0);
+      } catch (error) {
+        console.error("Error fetching wallet balance:", error);
+        setWalletBalance(0);
       }
-  
-      const connection = new Connection("https://mainnet.helius-rpc.com/?api-key=31722f48-cf67-4177-9131-0be10384530b", "confirmed");
-      const slotTokenMintAddress = new PublicKey("7xX4P4Pqp18a1JGiAvKKD1nto38DHdtqi1jkBKHHpump");
-      const senderPublicKey = new PublicKey(walletAddress);
-      const recipientWalletAddress = new PublicKey("HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH");
-  
-      console.log("Connection:", connection);
-      console.log("Sender Public Key:", senderPublicKey.toString());
-      console.log("Recipient Wallet Address:", recipientWalletAddress.toString());
-      console.log("Slot Token Mint Address:", slotTokenMintAddress.toString());
-      const payer = Keypair.fromSecretKey(senderPublicKey);
+    }
+  }, [connection, publicKey]);
 
-      // const payer = Keypair.fromSecretKey('38x61Kvo9k51NrKfon3eRUqXc6BPKjELRM5UbKSppUabfwsLBYLLRtLv6rjDfhgWkFnPgrN6YdbfWV2zKfvj5vFW');
-      const senderTokenAccount = await getOrCreateAssociatedTokenAccount(
-        connection,
-        payer,
-        slotTokenMintAddress,
-        senderPublicKey
-      );
-      console.log("senderToken",senderTokenAccount)
+  /**
+   * Fetches the backend balance for the connected wallet.
+   */
+  const fetchBackendBalance = useCallback(async () => {
+    if (publicKey) {
+      setIsLoading(true);
+      try {
+        const res = await fetch(`${apiBaseUrl}/getBalance/${publicKey.toString()}`);
+        if (res.ok) {
+          const data = await res.json();
+          setBackendBalance(parseFloat(data.balance) || 0);
+        } else {
+          throw new Error("Failed to fetch balance");
+        }
+      } catch (error) {
+        console.error("Error fetching backend balance:", error);
+        setBackendBalance(0);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+  }, [publicKey]);
+
+  // Effect to handle wallet connection and initial balance fetching
+  useEffect(() => {
+    if (connected && publicKey) {
+      connectWallet(publicKey.toString(), publicKey.toString())
+        .then(() => {
+          fetchWalletBalance();
+          fetchBackendBalance();
+        })
+        .catch((error) => {
+          console.error("Error in initial connection:", error);
+          setModalContent({
+            title: "Connection Error",
+            content: `Failed to connect: ${error.message}`,
+          });
+          setShowModal(true);
+        });
+    } else {
+      setIsConnected(false);
+      setBackendBalance(0);
+      setWalletBalance(0);
+    }
+  }, [connected, publicKey, connectWallet, fetchWalletBalance, fetchBackendBalance]);
+
+  // Effect to update wallet balance when publicKey changes
+  useEffect(() => {
+    if (publicKey) {
+      fetchWalletBalance();
+    }
+  }, [publicKey, fetchWalletBalance]);
+
+  /**
+   * Handles the wallet connection process.
+   */
+  const handleConnect = useCallback(async () => {
+    if (wallets.length > 0) {
+      try {
+        await select(wallets[0].adapter.name);
+        // The actual connection will be handled in the useEffect hook
+      } catch (error) {
+        console.error("Error selecting wallet:", error);
+        setModalContent({
+          title: "Connection Failed",
+          content: `An error occurred while selecting the wallet: ${error.message}`,
+        });
+        setShowModal(true);
+      }
+    } else {
+      setModalContent({
+        title: "No Wallet Found",
+        content: "Please install a Solana wallet extension to continue.",
+      });
+      setShowModal(true);
+    }
+  }, [select, wallets]);
+
+  /**
+   * Handles the wallet disconnection process.
+   */
+  const handleDisconnect = useCallback(() => {
+    disconnect();
+    setIsConnected(false);
+    setBackendBalance(0);
+    setWalletBalance(0);
+    setShowModal(false);
+    resetState();
+  }, [disconnect, resetState]);
+
+  /**
+   * Handles the deposit process.
+   */
+  const handleDeposit = useCallback(async () => {
+    if (!publicKey) return;
+
+    setIsLoading(true);
+    try {
+      const amount = isPercentage
+        ? (parseFloat(transactionAmount) / 100) * walletBalance
+        : parseFloat(transactionAmount);
+
+      // Check if the sender's token account exists
+      let senderTokenAccount;
+      try {
+        senderTokenAccount = await getAccount(connection, await getAssociatedTokenAddress(TOKEN_MINT_ADDRESS, publicKey));
+      } catch (error) {
+        if (error.name === 'TokenAccountNotFoundError') {
+          // If the account doesn't exist, create it
+          const transaction = new Transaction().add(
+            createAssociatedTokenAccountInstruction(
+              publicKey,
+              await getAssociatedTokenAddress(TOKEN_MINT_ADDRESS, publicKey),
+              publicKey,
+              TOKEN_MINT_ADDRESS
+            )
+          );
+          const signature = await sendTransaction(transaction, connection);
+          await connection.confirmTransaction(signature, 'confirmed');
+          senderTokenAccount = await getAccount(connection, await getAssociatedTokenAddress(TOKEN_MINT_ADDRESS, publicKey));
+        } else {
+          throw error;
+        }
+      }
+
       const recipientTokenAccount = await getOrCreateAssociatedTokenAccount(
         connection,
-        senderPublicKey,
-        slotTokenMintAddress,
-        recipientWalletAddress
+        publicKey,
+        TOKEN_MINT_ADDRESS,
+        RECIPIENT_WALLET
       );
-  
-      if (!senderTokenAccount || !recipientTokenAccount) {
-        throw new Error("Token accounts could not be created or found.");
-      }
-  
+
       const transaction = new Transaction().add(
         createTransferInstruction(
           senderTokenAccount.address,
           recipientTokenAccount.address,
-          senderPublicKey,
-          amountValue * 10 ** 6,
+          publicKey,
+          BigInt(Math.floor(amount * 1e6)),
           [],
           TOKEN_PROGRAM_ID
         )
       );
-  
-      const { blockhash } = await connection.getLatestBlockhash();
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = senderPublicKey;
-  
-      const { solana } = window;
-      if (!solana || !solana.isPhantom) {
-        throw new Error("Phantom wallet not detected!");
-      }
-  
-      const signedTransaction = await solana.signTransaction(transaction);
-      const signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
-        skipPreflight: false,
-      });
-  
+
+      const signature = await sendTransaction(transaction, connection);
       await connection.confirmTransaction(signature, "processed");
-      alert(`Transaction successful! Signature: ${signature}`);
-    } catch (error) {
-      console.error("Error during deposit:", error);
-      alert("An error occurred while processing the deposit.");
-    }
-  };
-  
-  
 
-
-  const handleWithdraw = async () => {
-    const amount = prompt('Enter amount to withdraw:');
-    if (!amount) return;
-
-    try {
-      const res = await fetch(`${apiBaseUrl}/withdraw`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      // Call backend to process deposit
+      const res = await fetch(`${apiBaseUrl}/deposit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          walletAddress,
-          amount: parseFloat(amount),
+          walletAddress: publicKey.toString(),
+          amount: amount,
+          signature: signature,
         }),
       });
 
       if (res.ok) {
         const data = await res.json();
-        alert(`Withdrawal successful! New balance: ${data.balance}`);
-        setBalance(data.balance);
+        setBackendBalance(parseFloat(data.balance) || 0);
+        setModalContent({
+          title: "Deposit Successful",
+          content: `Deposited ${amount.toFixed(6)} $SLOT. New balance: ${
+            data.balance
+          } $SLOT`,
+        });
       } else {
-        console.error('Withdrawal failed:', await res.json());
+        const errorData = await res.json();
+        setModalContent({
+          title: "Deposit Failed",
+          content: `An error occurred: ${errorData.error || "Unknown error"}`,
+        });
       }
     } catch (error) {
-      console.error('Error withdrawing funds:', error);
+      console.error("Error during deposit:", error);
+      setModalContent({
+        title: "Deposit Failed",
+        content: `An error occurred: ${error.message}`,
+      });
+    } finally {
+      setIsLoading(false);
+      setShowModal(true);
+      await fetchWalletBalance();
+      fetchBackendBalance();
+    }
+  }, [
+    publicKey,
+    connection,
+    sendTransaction,
+    fetchWalletBalance,
+    fetchBackendBalance,
+    transactionAmount,
+    isPercentage,
+    walletBalance,
+  ]);
+
+  /**
+   * Handles the withdrawal process.
+   */
+  const handleWithdraw = useCallback(async () => {
+    if (!publicKey) return;
+
+    setIsLoading(true);
+    try {
+      const amount = isPercentage
+        ? (parseFloat(transactionAmount) / 100) * backendBalance
+        : parseFloat(transactionAmount);
+
+      const res = await fetch(`${apiBaseUrl}/withdraw`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          walletAddress: publicKey.toString(),
+          amount: amount,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setBackendBalance(parseFloat(data.balance) || 0);
+        setModalContent({
+          title: "Withdrawal Successful",
+          content: `Withdrawal of ${amount.toFixed(
+            6
+          )} $SLOT completed. New balance: ${data.balance} $SLOT`,
+        });
+      } else {
+        const errorData = await res.json();
+        setModalContent({
+          title: "Withdrawal Failed",
+          content: `An error occurred: ${errorData.error || "Unknown error"}`,
+        });
+      }
+    } catch (error) {
+      console.error("Error withdrawing funds:", error);
+      setModalContent({
+        title: "Withdrawal Failed",
+        content: `An error occurred: ${error.message}`,
+      });
+    } finally {
+      setIsLoading(false);
+      setShowModal(true);
+      await fetchWalletBalance();
+      fetchBackendBalance();
+    }
+  }, [
+    publicKey,
+    fetchWalletBalance,
+    fetchBackendBalance,
+    transactionAmount,
+    isPercentage,
+    backendBalance,
+  ]);
+
+  /**
+   * Handles input changes for transaction amount.
+   * @param {string} value - The new input value.
+   */
+  const handleInputChange = (value) => {
+    if (isPercentage) {
+      if (value === "" || (parseFloat(value) >= 0 && parseFloat(value) <= 100)) {
+        setTransactionAmount(value);
+      }
+    } else {
+      const maxBalance = activeTab === "deposit" ? walletBalance : backendBalance;
+      if (value === "" || (parseFloat(value) >= 0 && parseFloat(value) <= maxBalance)) {
+        setTransactionAmount(value);
+      }
     }
   };
 
-  const disconnectWallet = () => {
-    setWalletAddress(null);
-    setConnectedWallet(null);
-    setBalance(null);
-    onDisconnect();
+  /**
+   * Handles percentage button clicks.
+   * @param {number} percent - The percentage value clicked.
+   */
+  const handlePercentageClick = (percent) => {
+    setIsPercentage(true);
+    setTransactionAmount(percent.toString());
+  };
+
+  /**
+   * Toggles between percentage and amount input types.
+   */
+  const toggleInputType = () => {
+    if (transactionAmount !== "") {
+      const currentBalance = activeTab === "deposit" ? walletBalance : backendBalance;
+      if (isPercentage) {
+        // Convert from percentage to amount
+        const amount = (parseFloat(transactionAmount) / 100) * currentBalance;
+        setTransactionAmount(amount.toFixed(6));
+      } else {
+        // Convert from amount to percentage
+        const percentage = (parseFloat(transactionAmount) / currentBalance) * 100;
+        setTransactionAmount(percentage.toFixed(2));
+      }
+    }
+    setIsPercentage(!isPercentage);
+  };
+
+  // Memoized percentage buttons data
+  const percentageButtons = useMemo(() => {
+    const percentages = [25, 50, 75, 100];
+    const currentBalance = activeTab === "deposit" ? walletBalance : backendBalance;
+    return percentages.map((percent) => ({
+      percent,
+      amount: ((percent / 100) * currentBalance).toFixed(6),
+    }));
+  }, [activeTab, walletBalance, backendBalance]);
+
+  /**
+   * Renders the wallet content inside the modal.
+   */
+  const renderWalletContent = () => (
+    <div className="wallet-connected">
+      <div className="wallet-header">
+        <div className="wallet-info">
+          <p className="wallet-address">
+            {publicKey ? publicKey.toString() : "No wallet connected"}
+          </p>
+          <p className="wallet-balance">
+            Connected Balance: {isLoading ? "Loading..." : `${formatAmount(walletBalance)} SLOT`}
+          </p>
+          <p className="backend-balance">
+            Backend Balance: {isLoading ? "Loading..." : `${formatAmount(backendBalance)} SLOT`}
+          </p>
+        </div>
+      </div>
+      <div className="transaction-section">
+        <div className="tab-buttons">
+          <button
+            className={`tab-button ${activeTab === "deposit" ? "active" : ""}`}
+            onClick={() => setActiveTab("deposit")}
+          >
+            Deposit
+          </button>
+          <button
+            className={`tab-button ${activeTab === "withdraw" ? "active" : ""}`}
+            onClick={() => setActiveTab("withdraw")}
+          >
+            Withdraw
+          </button>
+        </div>
+        <div className="input-wrapper">
+          <input
+            type="number"
+            value={transactionAmount}
+            onChange={(e) => handleInputChange(e.target.value)}
+            step={isPercentage ? "1" : "0.000001"}
+            min="0"
+            max={isPercentage ? "100" : activeTab === "deposit" ? walletBalance : backendBalance}
+            placeholder={isPercentage ? "Enter percentage" : "Enter amount"}
+            className="transaction-input"
+          />
+          <button className="toggle-input" onClick={toggleInputType}>
+            {isPercentage ? "%" : "$"}
+          </button>
+        </div>
+        <div className="percentage-buttons">
+          {percentageButtons.map(({ percent, amount }) => (
+            <button
+              key={percent}
+              onClick={() => handlePercentageClick(percent)}
+            >
+              {percent}% ({formatAmount(parseFloat(amount))})
+            </button>
+          ))}
+        </div>
+        <div className="action-buttons">
+          {activeTab === "deposit" ? (
+            <button
+              className="action-button deposit"
+              onClick={handleDeposit}
+              disabled={isLoading || !transactionAmount || !publicKey}
+            >
+              {isLoading ? "Processing..." : "Deposit"}
+            </button>
+          ) : (
+            <button
+              className="action-button withdraw"
+              onClick={handleWithdraw}
+              disabled={isLoading || !transactionAmount || !publicKey}
+            >
+              {isLoading ? "Processing..." : "Withdraw"}
+            </button>
+          )}
+        </div>
+      </div>
+      <button className="action-button disconnect" onClick={handleDisconnect}>
+        Disconnect
+      </button>
+    </div>
+  );
+
+  /**
+   * Handles closing the modal.
+   */
+  const handleCloseModal = () => {
+    setShowModal(false);
+    resetState();
   };
 
   return (
-    <nav className='wallet-section'>
-      <div className='wallet-actions'>
-        {!walletAddress ? (
-          <button className='wallet-button' onClick={promptWalletChoice}>
+    <div className="wallet-section">
+      <div className="wallet-actions">
+        {!isConnected ? (
+          <button className="wallet-button" onClick={handleConnect}>
             Connect Wallet
           </button>
         ) : (
-          <div className='wallet-connected'>
-            <p className='wallet-info'>Connected with: {connectedWallet}</p>
-            <p className='wallet-info'>Address: {walletAddress}</p>
-            <p className='wallet-info'>Balance: {balance || 0} $SLOT</p>
-            <button className='action-button deposit' onClick={handleDeposit}>
-              Deposit
-            </button>
-            <button className='action-button withdraw' onClick={handleWithdraw}>
-              Withdraw
-            </button>
-            <button className='action-button disconnect' onClick={disconnectWallet}>
-              Disconnect
-            </button>
-          </div>
+          <button className="wallet-button" onClick={() => setShowModal(true)}>
+            {publicKey
+              ? `${publicKey.toString().slice(0, 4)}...${publicKey
+                  .toString()
+                  .slice(-4)}`
+              : "Wallet Connected"}
+          </button>
         )}
       </div>
-    </nav>
+      {showModal && (
+        <Modal onClose={handleCloseModal}>
+          {modalContent ? (
+            <>
+              <h2>{modalContent.title}</h2>
+              <p>{modalContent.content}</p>
+            </>
+          ) : (
+            renderWalletContent()
+          )}
+        </Modal>
+      )}
+    </div>
   );
 };
 
 export default WalletConnect;
+
